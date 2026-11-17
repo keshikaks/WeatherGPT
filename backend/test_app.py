@@ -4,7 +4,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import app
-from weather import LocationNotFoundError, WeatherServiceError
+from weather import (
+    RATE_LIMIT_MESSAGE,
+    LocationNotFoundError,
+    WeatherRateLimitError,
+    WeatherServiceError,
+)
 
 
 def weather_fixture():
@@ -102,6 +107,17 @@ class WeatherEndpointTests(unittest.TestCase):
         self.assertEqual(payload["location"]["latitude"], 12.5)
         self.assertEqual(payload["location"]["longitude"], -45.25)
         self.assertEqual(payload["location"]["timezone"], "Europe/Helsinki")
+        forecast.assert_called_once()
+
+    @patch.object(app, "get_forecast", side_effect=WeatherRateLimitError(RATE_LIMIT_MESSAGE))
+    def test_coordinate_request_reports_clear_provider_rate_limit(self, forecast):
+        response = self.client.post(
+            "/api/weather",
+            json={"latitude": 12.5, "longitude": -45.25},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"error": RATE_LIMIT_MESSAGE})
         forecast.assert_called_once()
 
     def test_coordinate_request_rejects_missing_and_invalid_coordinates(self):

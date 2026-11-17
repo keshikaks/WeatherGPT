@@ -17,6 +17,8 @@ from werkzeug.exceptions import HTTPException
 from weather import (
     InvalidCoordinatesError,
     LocationNotFoundError,
+    RATE_LIMIT_MESSAGE,
+    WeatherRateLimitError,
     WeatherServiceError,
     get_forecast,
     resolve_coordinates,
@@ -737,6 +739,9 @@ def weather_endpoint() -> tuple[Response, int]:
 
         try:
             weather = get_forecast(location)
+        except WeatherRateLimitError:
+            app.logger.warning("Open-Meteo forecast rate limit reached")
+            return _error(RATE_LIMIT_MESSAGE, 503)
         except WeatherServiceError:
             app.logger.exception("Open-Meteo request failed")
             return _error(
@@ -766,6 +771,9 @@ def weather_endpoint() -> tuple[Response, int]:
             weather = get_forecast(location)
         except LocationNotFoundError as exc:
             return _error(str(exc), 404)
+        except WeatherRateLimitError:
+            app.logger.warning("Open-Meteo rate limit reached")
+            return _error(RATE_LIMIT_MESSAGE, 503)
         except WeatherServiceError:
             app.logger.exception("Open-Meteo request failed")
             return _error(
@@ -838,6 +846,9 @@ def weather_endpoint() -> tuple[Response, int]:
         return _error(str(exc), 400)
     except LocationNotFoundError as exc:
         return _error(str(exc), 404)
+    except WeatherRateLimitError:
+        app.logger.warning("Open-Meteo location lookup rate limit reached")
+        return _error(RATE_LIMIT_MESSAGE, 503)
     except WeatherServiceError:
         app.logger.exception("Open-Meteo location lookup failed")
         return _error(
@@ -852,6 +863,9 @@ def weather_endpoint() -> tuple[Response, int]:
     try:
         weather = get_forecast(location)
 
+    except WeatherRateLimitError:
+        app.logger.warning("Open-Meteo forecast rate limit reached")
+        return _error(RATE_LIMIT_MESSAGE, 503)
     except WeatherServiceError:
         app.logger.exception(
             "Open-Meteo request failed"
@@ -914,6 +928,9 @@ def compare_weather() -> tuple[Response, int]:
             weather = get_forecast(location)
         except LocationNotFoundError as exc:
             return _error(str(exc), 404)
+        except WeatherRateLimitError:
+            app.logger.warning("Open-Meteo rate limit reached during city comparison")
+            return _error(RATE_LIMIT_MESSAGE, 503)
         except WeatherServiceError:
             app.logger.exception("Open-Meteo request failed during city comparison")
             return _error(

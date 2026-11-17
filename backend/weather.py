@@ -1,7 +1,14 @@
 """Open-Meteo geocoding and forecast access."""
 
-from datetime import datetime
+from collections import OrderedDict
+from concurrent.futures import Future
+from copy import deepcopy
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import json
 from math import isfinite
+from threading import Lock
+import time
 from typing import Any
 
 import requests
@@ -9,6 +16,21 @@ import requests
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 REQUEST_TIMEOUT = (5, 20)
+FORECAST_CACHE_TTL_SECONDS = 300
+GEOCODING_CACHE_TTL_SECONDS = 3600
+CACHE_MAX_ENTRIES = 512
+MAX_429_RETRIES = 2
+MAX_RETRY_WAIT_SECONDS = 4
+INITIAL_RETRY_DELAY_SECONDS = 0.5
+MAX_RETRY_DELAY_SECONDS = 2
+FORECAST_CACHE_COORDINATE_PRECISION = 3
+RATE_LIMIT_MESSAGE = (
+    "The weather provider is receiving too many requests. Please try again shortly."
+)
+
+_response_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_in_flight: dict[str, Future[dict[str, Any]]] = {}
+_cache_lock = Lock()
 
 WEATHER_CODES = {
     0: "Clear sky",
@@ -46,6 +68,10 @@ class WeatherServiceError(Exception):
     """An upstream weather API error safe to report to the application layer."""
 
 
+class WeatherRateLimitError(WeatherServiceError):
+    """The upstream weather API remained rate-limited after bounded retries."""
+
+
 class LocationNotFoundError(WeatherServiceError):
     """No geocoding result was found for the requested place."""
 
@@ -78,21 +104,129 @@ def _weather_condition(value: Any) -> str:
     return WEATHER_CODES.get(code, "Conditions unavailable")
 
 
-def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
-    try:
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.Timeout as exc:
-        raise WeatherServiceError("The weather provider took too long to respond.") from exc
-    except requests.RequestException as exc:
-        raise WeatherServiceError("The weather provider is temporarily unavailable.") from exc
-    except ValueError as exc:
-        raise WeatherServiceError("The weather provider returned an unreadable response.") from exc
+def _cache_ttl(url: str) -> int:
+    if url == FORECAST_URL:
+        return FORECAST_CACHE_TTL_SECONDS
+    if url == GEOCODING_URL:
+        return GEOCODING_CACHE_TTL_SECONDS
+    return 0
 
-    if not isinstance(payload, dict):
-        raise WeatherServiceError("The weather provider returned an invalid response.")
-    return payload
+
+def _cache_key(url: str, params: dict[str, Any]) -> str:
+    cache_params = params
+    if url == FORECAST_URL:
+        cache_params = params.copy()
+        for coordinate in ("latitude", "longitude"):
+            value = cache_params.get(coordinate)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                rounded = round(float(value), FORECAST_CACHE_COORDINATE_PRECISION)
+                cache_params[coordinate] = 0.0 if rounded == 0 else rounded
+    return json.dumps((url, cache_params), sort_keys=True, separators=(",", ":"))
+
+
+def _retry_delay(response: requests.Response, attempt: int, waited: float) -> float | None:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            delay = max(0.0, float(retry_after))
+        except ValueError:
+            try:
+                retry_time = parsedate_to_datetime(retry_after)
+                if retry_time.tzinfo is None:
+                    retry_time = retry_time.replace(tzinfo=timezone.utc)
+                delay = max(0.0, (retry_time - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                delay = min(
+                    INITIAL_RETRY_DELAY_SECONDS * (2**attempt),
+                    MAX_RETRY_DELAY_SECONDS,
+                )
+    else:
+        delay = min(
+            INITIAL_RETRY_DELAY_SECONDS * (2**attempt),
+            MAX_RETRY_DELAY_SECONDS,
+        )
+
+    if delay > MAX_RETRY_WAIT_SECONDS - waited:
+        return None
+    return delay
+
+
+def _fetch_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
+    waited = 0.0
+    for attempt in range(MAX_429_RETRIES + 1):
+        try:
+            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        except requests.Timeout as exc:
+            raise WeatherServiceError("The weather provider took too long to respond.") from exc
+        except requests.RequestException as exc:
+            raise WeatherServiceError("The weather provider is temporarily unavailable.") from exc
+
+        if response.status_code == 429:
+            delay = (
+                _retry_delay(response, attempt, waited)
+                if attempt < MAX_429_RETRIES
+                else None
+            )
+            if delay is None:
+                raise WeatherRateLimitError(RATE_LIMIT_MESSAGE)
+            time.sleep(delay)
+            waited += delay
+            continue
+
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise WeatherServiceError("The weather provider is temporarily unavailable.") from exc
+        except ValueError as exc:
+            raise WeatherServiceError("The weather provider returned an unreadable response.") from exc
+
+        if not isinstance(payload, dict):
+            raise WeatherServiceError("The weather provider returned an invalid response.")
+        return payload
+
+    raise WeatherRateLimitError(RATE_LIMIT_MESSAGE)
+
+
+def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
+    key = _cache_key(url, params)
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _response_cache.get(key)
+        if cached is not None:
+            expires_at, payload = cached
+            if expires_at > now:
+                _response_cache.move_to_end(key)
+                return deepcopy(payload)
+            del _response_cache[key]
+
+        future = _in_flight.get(key)
+        is_owner = future is None
+        if is_owner:
+            future = Future()
+            _in_flight[key] = future
+
+    if not is_owner:
+        return deepcopy(future.result())
+
+    try:
+        payload = _fetch_json(url, params)
+    except BaseException as exc:
+        with _cache_lock:
+            future.set_exception(exc)
+            del _in_flight[key]
+        raise
+
+    ttl = _cache_ttl(url)
+    with _cache_lock:
+        if ttl:
+            _response_cache[key] = (time.monotonic() + ttl, payload)
+            _response_cache.move_to_end(key)
+            while len(_response_cache) > CACHE_MAX_ENTRIES:
+                _response_cache.popitem(last=False)
+        future.set_result(payload)
+        del _in_flight[key]
+    return deepcopy(payload)
 
 
 def resolve_location(query: str) -> dict[str, Any]:
