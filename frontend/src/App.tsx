@@ -501,7 +501,7 @@ export default function App() {
             <p className="intro-copy">
               Current conditions and a practical seven-day outlook for wherever you are.
             </p>
-            <p className="source-note">Forecasts from MET Norway</p>
+            <p className="source-note">Live data from MET Norway</p>
           </div>
         </section>
 
