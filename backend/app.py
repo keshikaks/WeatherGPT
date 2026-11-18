@@ -21,6 +21,7 @@ from weather import (
     WeatherRateLimitError,
     WeatherServiceError,
     get_forecast,
+    reverse_geocode,
     resolve_coordinates,
     resolve_location,
 )
@@ -790,6 +791,12 @@ def weather_endpoint() -> tuple[Response, int]:
                 location = resolve_coordinates(body["latitude"], body["longitude"])
         except InvalidCoordinatesError as exc:
             return _error(str(exc), 400)
+
+        try:
+            location["name"] = reverse_geocode(location["latitude"], location["longitude"])
+        except WeatherServiceError:
+            app.logger.warning("Reverse geocoding failed for browser coordinates", exc_info=True)
+            location["name"] = "Current Location"
 
         try:
             weather = get_forecast(location)

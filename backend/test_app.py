@@ -93,7 +93,10 @@ class WeatherEndpointTests(unittest.TestCase):
         self.assertIn("error", response.get_json())
 
     @patch.object(app, "get_forecast", return_value=weather_fixture())
-    def test_coordinate_request_returns_weather_without_calling_groq(self, forecast):
+    @patch.object(app, "reverse_geocode", return_value="Chennai")
+    def test_coordinate_request_returns_weather_without_calling_groq(
+        self, reverse_geocode, forecast
+    ):
         response = self.client.post(
             "/api/weather",
             json={"latitude": 12.5, "longitude": -45.25},
@@ -101,14 +104,18 @@ class WeatherEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(payload["location"]["name"], "Your location")
+        self.assertEqual(payload["location"]["name"], "Chennai")
         self.assertEqual(payload["location"]["latitude"], 12.5)
         self.assertEqual(payload["location"]["longitude"], -45.25)
         self.assertEqual(payload["location"]["timezone"], "Europe/Helsinki")
         forecast.assert_called_once()
+        reverse_geocode.assert_called_once_with(12.5, -45.25)
 
     @patch.object(app, "get_forecast", side_effect=WeatherRateLimitError(RATE_LIMIT_MESSAGE))
-    def test_coordinate_request_reports_clear_provider_rate_limit(self, forecast):
+    @patch.object(app, "reverse_geocode", return_value="Chennai")
+    def test_coordinate_request_reports_clear_provider_rate_limit(
+        self, reverse_geocode, forecast
+    ):
         response = self.client.post(
             "/api/weather",
             json={"latitude": 12.5, "longitude": -45.25},
@@ -116,7 +123,23 @@ class WeatherEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json(), {"error": RATE_LIMIT_MESSAGE})
+        reverse_geocode.assert_called_once_with(12.5, -45.25)
         forecast.assert_called_once()
+
+    @patch.object(app, "get_forecast", return_value=weather_fixture())
+    @patch.object(app, "reverse_geocode", side_effect=WeatherServiceError("Reverse lookup failed."))
+    def test_coordinate_request_uses_current_location_when_reverse_geocoding_fails(
+        self, reverse_geocode, forecast
+    ):
+        response = self.client.post(
+            "/api/weather",
+            json={"latitude": 12.5, "longitude": -45.25},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["location"]["name"], "Current Location")
+        forecast.assert_called_once()
+        reverse_geocode.assert_called_once_with(12.5, -45.25)
 
     def test_coordinate_request_rejects_missing_and_invalid_coordinates(self):
         for body in (

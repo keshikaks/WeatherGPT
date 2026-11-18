@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import requests
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+REVERSE_GEOCODING_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client"
 FORECAST_URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
 MET_USER_AGENT = "WeatherGPT/1.0 (https://github.com/syntaxelite/WeatherGPT)"
 REQUEST_TIMEOUT = (5, 20)
@@ -133,7 +134,7 @@ def _cache_ttl(url: str, cache_control: str = "") -> int:
         max_age = re.search(r"(?:^|,)\s*max-age=(\d+)", cache_control, re.IGNORECASE)
         server_ttl = int(max_age.group(1)) if max_age else 0
         return max(FORECAST_CACHE_TTL_SECONDS, server_ttl)
-    if url == GEOCODING_URL:
+    if url in (GEOCODING_URL, REVERSE_GEOCODING_URL):
         return GEOCODING_CACHE_TTL_SECONDS
     return 0
 
@@ -187,7 +188,7 @@ def _fetch_json(url: str, params: dict[str, Any]) -> tuple[dict[str, Any], str]:
                 "params": params,
                 "timeout": REQUEST_TIMEOUT,
             }
-            if url == FORECAST_URL:
+            if url in (FORECAST_URL, REVERSE_GEOCODING_URL):
                 request_options["headers"] = {"User-Agent": MET_USER_AGENT}
             response = requests.get(url, **request_options)
         except requests.Timeout as exc:
@@ -300,6 +301,20 @@ def resolve_location(query: str) -> dict[str, Any]:
             else {}
         ),
     }
+
+
+def reverse_geocode(latitude: float, longitude: float) -> str:
+    """Return a city or locality name for validated coordinates."""
+
+    payload = _get_json(
+        REVERSE_GEOCODING_URL,
+        {"latitude": latitude, "longitude": longitude, "localityLanguage": "en"},
+    )
+    for key in ("city", "locality"):
+        name = payload.get(key)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    raise WeatherServiceError("The reverse-geocoding provider returned no city or locality.")
 
 
 def resolve_coordinates(

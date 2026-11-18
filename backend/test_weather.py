@@ -11,6 +11,7 @@ from weather import (
     FORECAST_CACHE_TTL_SECONDS,
     FORECAST_URL,
     GEOCODING_URL,
+    REVERSE_GEOCODING_URL,
     InvalidCoordinatesError,
     LocationNotFoundError,
     RATE_LIMIT_MESSAGE,
@@ -18,6 +19,7 @@ from weather import (
     WeatherServiceError,
     _get_json,
     get_forecast,
+    reverse_geocode,
     resolve_coordinates,
     resolve_location,
 )
@@ -59,6 +61,32 @@ class WeatherProviderTests(unittest.TestCase):
 
         self.assertEqual(location["timezone"], "Europe/Helsinki")
         self.assertEqual(get.call_args.args[0], GEOCODING_URL)
+
+    @patch("weather.requests.get")
+    def test_reverse_geocoding_returns_city_name(self, get):
+        response = Mock()
+        response.json.return_value = {"city": "Chennai", "locality": "Chennai"}
+        get.return_value = response
+
+        self.assertEqual(reverse_geocode(13.08, 80.27), "Chennai")
+        self.assertEqual(get.call_args.args[0], REVERSE_GEOCODING_URL)
+
+    @patch("weather.requests.get")
+    def test_reverse_geocoding_uses_locality_when_city_is_missing(self, get):
+        response = Mock()
+        response.json.return_value = {"locality": "Erode"}
+        get.return_value = response
+
+        self.assertEqual(reverse_geocode(11.34, 77.72), "Erode")
+
+    @patch("weather.requests.get")
+    def test_reverse_geocoding_rejects_missing_locality(self, get):
+        response = Mock()
+        response.json.return_value = {"countryName": "India"}
+        get.return_value = response
+
+        with self.assertRaisesRegex(WeatherServiceError, "no city or locality"):
+            reverse_geocode(0, 0)
 
     def test_rejects_invalid_coordinates(self):
         for latitude, longitude in (
