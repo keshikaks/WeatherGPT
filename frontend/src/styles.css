@@ -1242,6 +1242,12 @@ input:focus-visible {
   opacity: 0.72;
 }
 
+.rain-column-fill.precipitation-unavailable {
+  border-top: 1px dashed var(--secondary);
+  background: transparent;
+  opacity: 1;
+}
+
 .chart-scale {
   display: flex;
   justify-content: space-between;

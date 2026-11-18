@@ -1,9 +1,10 @@
 export interface HourlyWeather {
   time: string;
   temperature_c: number;
-  rain_probability_pct: number;
-  precipitation_mm: number;
+  precipitation_mm: number | null;
   wind_kmh: number;
+  wind_direction_degrees: number;
+  cloud_cover_pct: number;
   condition: string;
 }
 
@@ -12,14 +13,13 @@ export interface DailyWeather {
   high_c: number;
   low_c: number;
   condition: string;
-  rain_probability_pct: number;
+  precipitation_mm: number | null;
 }
 
 export interface ActivityWindow {
   time: string;
   temperature_c: number;
-  rain_probability_pct: number;
-  precipitation_mm: number;
+  precipitation_mm: number | null;
   wind_kmh: number;
   condition: string;
 }
@@ -27,7 +27,7 @@ export interface ActivityWindow {
 export function getActivityPlans(hours: HourlyWeather[]): Array<{
   activity: string;
   criteria: {
-    maxRainProbabilityPct: number;
+    maxPrecipitationMm: number;
     maxWindKmh: number;
     minTemperatureC: number;
     maxTemperatureC: number;

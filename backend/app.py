@@ -51,9 +51,9 @@ QUESTION_ACTIVITIES = {
 }
 
 ACTIVITY_THRESHOLDS = {
-    "picnic": {"rain": 18, "wind": 22, "min_temp": 16, "max_temp": 31},
-    "running": {"rain": 30, "wind": 30, "min_temp": 6, "max_temp": 29},
-    "outdoor": {"rain": 45, "wind": 38, "min_temp": 2, "max_temp": 34},
+    "picnic": {"wind": 22, "min_temp": 16, "max_temp": 31},
+    "running": {"wind": 30, "min_temp": 6, "max_temp": 29},
+    "outdoor": {"wind": 38, "min_temp": 2, "max_temp": 34},
 }
 
 
@@ -360,7 +360,15 @@ def _resolve_default_location(value: Any) -> dict[str, Any] | None:
     if has_latitude != has_longitude:
         raise ValueError("The selected weather location has incomplete coordinates.")
     if has_latitude:
-        location = resolve_coordinates(value["latitude"], value["longitude"])
+        timezone_name = value.get("timezone")
+        if isinstance(timezone_name, str):
+            location = resolve_coordinates(
+                value["latitude"],
+                value["longitude"],
+                timezone_name,
+            )
+        else:
+            location = resolve_coordinates(value["latitude"], value["longitude"])
         location["name"] = name.strip()
         region = value.get("region", "")
         country = value.get("country", "")
@@ -372,7 +380,7 @@ def _resolve_default_location(value: Any) -> dict[str, Any] | None:
 
 
 def _display_date(value: str) -> str:
-    """Format an Open-Meteo local forecast date for a conversational answer."""
+    """Format a local forecast date for a conversational answer."""
 
     try:
         forecast_date = date.fromisoformat(value)
@@ -413,7 +421,6 @@ def _is_severe_condition(condition: str) -> bool:
 def _hourly_recommendation(activity: str, hour: dict[str, Any]) -> str:
     """Apply the assistant's weather-only thresholds to one forecast hour."""
 
-    rain = hour["rain_probability_pct"]
     precipitation = hour["precipitation_mm"]
     wind = hour["wind_kmh"]
     temperature = hour["temperature_c"]
@@ -424,30 +431,30 @@ def _hourly_recommendation(activity: str, hour: dict[str, Any]) -> str:
         return "It depends"
 
     if activity == "umbrella":
-        if severe or rain >= 30 or precipitation > 0.2 or any(
+        if severe or (precipitation is not None and precipitation > 0.2) or any(
             term in condition.casefold() for term in ("rain", "drizzle", "snow")
         ):
             return "Yes"
-        return "No"
+        return "No" if precipitation is not None else "It depends"
 
     if activity == "travel":
-        if severe or rain >= 70 or wind >= 50:
+        if severe or (precipitation is not None and precipitation >= 2) or wind >= 50:
             return "No"
-        if rain <= 25 and wind < 30:
+        if precipitation is not None and precipitation <= 0.2 and wind < 30:
             return "Yes"
         return "It depends"
 
     thresholds = ACTIVITY_THRESHOLDS[activity]
     suitable = (
         not severe
-        and rain <= thresholds["rain"]
+        and precipitation is not None
         and precipitation <= 0.2
         and wind <= thresholds["wind"]
         and thresholds["min_temp"] <= temperature <= thresholds["max_temp"]
     )
     if suitable:
         return "Yes"
-    if severe or rain >= 70 or wind >= 45 or temperature < 0 or temperature > 35:
+    if severe or (precipitation is not None and precipitation >= 2) or wind >= 45 or temperature < 0 or temperature > 35:
         return "No"
     return "It depends"
 
@@ -465,44 +472,51 @@ def _hourly_answer(
     time_label = _display_time(local_time)
     date_label = _display_date(forecast_date)
     condition = hour["condition"]
-    rain = hour["rain_probability_pct"]
     wind = round(hour["wind_kmh"])
     temperature = round(hour["temperature_c"])
     precipitation = hour["precipitation_mm"]
+    period_hours = hour.get("period_hours", 1)
+    period_label = f"next {period_hours} hour" + ("" if period_hours == 1 else "s")
 
     if activity == "general":
+        precipitation_text = (
+            f" about {precipitation:g} mm of precipitation expected over the {period_label},"
+            if precipitation is not None
+            else ""
+        )
         return (
             f"Around {time_label} in {location_name} on {date_label}, expect "
-            f"{condition.lower()}, about {temperature}°C, a {rain}% chance of rain, "
+            f"{condition.lower()}, about {temperature}°C,{precipitation_text} "
             f"and {wind} km/h winds."
         )
     if activity == "umbrella":
         if decision == "Yes":
+            precipitation_text = (
+                f" About {precipitation:g} mm of precipitation is expected."
+                if precipitation is not None and precipitation > 0
+                else ""
+            )
             return (
                 f"Yes—bring an umbrella around {time_label} in {location_name}: "
-                f"{rain}% chance of rain"
-                f"{f' and {precipitation:g} mm of precipitation' if precipitation > 0 else ''}."
+                f"{condition.lower()}.{precipitation_text}"
             )
         if decision == "No":
             return (
                 f"No, you likely won't need an umbrella around {time_label} in "
-                f"{location_name}: the forecast shows {rain}% chance of rain and "
-                f"no precipitation."
+                f"{location_name}: the forecast shows {condition.lower()} and "
+                f"{precipitation:g} mm of precipitation."
             )
         return (
-            f"It depends: rain chance around {time_label} in {location_name} is "
-            f"{rain}%, so check again closer to the time."
+            f"It depends: precipitation data around {time_label} in {location_name} "
+            "is unavailable, so check again closer to the time."
         )
 
     if activity == "travel":
-        evidence = f"{condition.lower()}, {rain}% chance of rain, and {wind} km/h winds"
+        evidence = f"{condition.lower()} and {wind} km/h winds"
         action = "travel"
     else:
-        evidence = (
-            f"{condition.lower()}, {temperature}°C, {rain}% chance of rain, "
-            f"and {wind} km/h winds"
-        )
-        if precipitation > 0.2:
+        evidence = f"{condition.lower()}, {temperature}°C, and {wind} km/h winds"
+        if precipitation is not None and precipitation > 0:
             evidence += f", with {precipitation:g} mm of precipitation"
         action = {"picnic": "a picnic", "running": "running", "outdoor": "outdoor plans"}[activity]
 
@@ -528,13 +542,25 @@ def _daily_recommendation(
 
     date_label = _display_date(forecast_date)
     condition = day["condition"]
-    rain = day["rain_probability_pct"]
+    precipitation = day["precipitation_mm"]
 
     if activity == "umbrella":
-        if _is_severe_condition(condition) or rain >= 30 or any(
+        if _is_severe_condition(condition) or (
+            precipitation is not None and precipitation > 0.2
+        ) or any(
             term in condition.casefold() for term in ("rain", "drizzle", "snow")
         ):
-            return f"Yes—take an umbrella in {location_name} on {date_label}: up to {rain}% chance of rain."
+            amount = (
+                f". About {precipitation:g} mm of precipitation is expected"
+                if precipitation is not None
+                else ""
+            )
+            return f"Yes—take an umbrella in {location_name} on {date_label}: {condition.lower()}{amount}."
+        if precipitation is None:
+            return (
+                f"It depends: precipitation data for {location_name} on {date_label} "
+                "is unavailable, so check again closer to the time."
+            )
         condition_note = (
             ""
             if "unavailable" in condition.casefold()
@@ -542,7 +568,8 @@ def _daily_recommendation(
         )
         return (
             f"No, you likely won't need an umbrella in {location_name} on "
-            f"{date_label}: up to {rain}% chance of rain.{condition_note}"
+            f"{date_label}: {precipitation:g} mm of precipitation is expected."
+            f"{condition_note}"
         )
 
     daytime_hours = [
@@ -561,7 +588,12 @@ def _daily_recommendation(
     if suitable_hours:
         best_hour = min(
             suitable_hours,
-            key=lambda hour: (hour["rain_probability_pct"], hour["wind_kmh"]),
+            key=lambda hour: (
+                hour["precipitation_mm"]
+                if hour["precipitation_mm"] is not None
+                else float("inf"),
+                hour["wind_kmh"],
+            ),
         )
         return _hourly_answer(
             activity,
@@ -577,9 +609,14 @@ def _daily_recommendation(
         )
 
     high = round(day["high_c"])
+    precipitation_text = (
+        f" and {precipitation:g} mm of precipitation is expected"
+        if precipitation is not None
+        else ""
+    )
     if (
         _is_severe_condition(condition)
-        or rain >= 70
+        or (precipitation is not None and precipitation >= 2)
         or high < 0
         or high > 35
     ):
@@ -588,7 +625,7 @@ def _daily_recommendation(
         decision = "It depends"
     return (
         f"{decision}: {location_name}'s forecast for {date_label} is {condition.lower()}, "
-        f"with a high near {high}°C and up to {rain}% chance of rain; "
+        f"with a high near {high}°C{precipitation_text}; "
         f"I don't see a suitable daytime hour for {activity}."
     )
 
@@ -671,17 +708,26 @@ def generate_answer(
         )
 
     if "unavailable" in day["condition"].casefold():
+        precipitation_text = (
+            f" Expected precipitation is about {day['precipitation_mm']:g} mm."
+            if day["precipitation_mm"] is not None
+            else ""
+        )
         return (
             f"I can't confirm the conditions in {location_name} on {date_label}. "
             f"The forecast still shows a high near {round(day['high_c'])}°C, "
-            f"a low around {round(day['low_c'])}°C, and up to "
-            f"{day['rain_probability_pct']}% chance of rain."
+            f"a low around {round(day['low_c'])}°C.{precipitation_text}"
         )
 
+    precipitation_text = (
+        f", and expected precipitation of {day['precipitation_mm']:g} mm"
+        if day["precipitation_mm"] is not None
+        else ""
+    )
     return (
         f"For {location_name} on {date_label}, expect {day['condition'].lower()}, "
-        f"a high near {round(day['high_c'])}°C, a low around {round(day['low_c'])}°C, "
-        f"and up to {day['rain_probability_pct']}% chance of rain."
+        f"a high near {round(day['high_c'])}°C and a low around "
+        f"{round(day['low_c'])}°C{precipitation_text}."
     )
 
 
@@ -733,17 +779,25 @@ def weather_endpoint() -> tuple[Response, int]:
         if not has_latitude or not has_longitude:
             return _error("Send both latitude and longitude.", 400)
         try:
-            location = resolve_coordinates(body["latitude"], body["longitude"])
+            timezone_name = body.get("timezone")
+            if isinstance(timezone_name, str):
+                location = resolve_coordinates(
+                    body["latitude"],
+                    body["longitude"],
+                    timezone_name,
+                )
+            else:
+                location = resolve_coordinates(body["latitude"], body["longitude"])
         except InvalidCoordinatesError as exc:
             return _error(str(exc), 400)
 
         try:
             weather = get_forecast(location)
         except WeatherRateLimitError:
-            app.logger.warning("Open-Meteo forecast rate limit reached")
+            app.logger.warning("MET Norway forecast rate limit reached")
             return _error(RATE_LIMIT_MESSAGE, 503)
         except WeatherServiceError:
-            app.logger.exception("Open-Meteo request failed")
+            app.logger.exception("MET Norway forecast request failed")
             return _error(
                 "Weather data is temporarily unavailable. Please try again.",
                 502,
@@ -772,10 +826,10 @@ def weather_endpoint() -> tuple[Response, int]:
         except LocationNotFoundError as exc:
             return _error(str(exc), 404)
         except WeatherRateLimitError:
-            app.logger.warning("Open-Meteo rate limit reached")
+            app.logger.warning("Weather provider rate limit reached")
             return _error(RATE_LIMIT_MESSAGE, 503)
         except WeatherServiceError:
-            app.logger.exception("Open-Meteo request failed")
+            app.logger.exception("Weather provider request failed")
             return _error(
                 "Weather data is temporarily unavailable. Please try again.",
                 502,
@@ -857,18 +911,18 @@ def weather_endpoint() -> tuple[Response, int]:
         )
 
     # ---------------------------------------------------------
-    # STEP 3: Get real weather data from Open-Meteo
+    # STEP 3: Get real weather data from MET Norway
     # ---------------------------------------------------------
 
     try:
         weather = get_forecast(location)
 
     except WeatherRateLimitError:
-        app.logger.warning("Open-Meteo forecast rate limit reached")
+        app.logger.warning("MET Norway forecast rate limit reached")
         return _error(RATE_LIMIT_MESSAGE, 503)
     except WeatherServiceError:
         app.logger.exception(
-            "Open-Meteo request failed"
+            "MET Norway forecast request failed"
         )
 
         return _error(
@@ -929,10 +983,10 @@ def compare_weather() -> tuple[Response, int]:
         except LocationNotFoundError as exc:
             return _error(str(exc), 404)
         except WeatherRateLimitError:
-            app.logger.warning("Open-Meteo rate limit reached during city comparison")
+            app.logger.warning("MET Norway rate limit reached during city comparison")
             return _error(RATE_LIMIT_MESSAGE, 503)
         except WeatherServiceError:
-            app.logger.exception("Open-Meteo request failed during city comparison")
+            app.logger.exception("MET Norway request failed during city comparison")
             return _error(
                 "Weather data is temporarily unavailable. Please try again.",
                 502,

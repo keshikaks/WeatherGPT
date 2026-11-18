@@ -1,6 +1,6 @@
 import unittest
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Event
 from unittest.mock import Mock, patch
 
@@ -8,6 +8,7 @@ import requests
 import weather
 
 from weather import (
+    FORECAST_CACHE_TTL_SECONDS,
     FORECAST_URL,
     GEOCODING_URL,
     InvalidCoordinatesError,
@@ -15,7 +16,6 @@ from weather import (
     RATE_LIMIT_MESSAGE,
     WeatherRateLimitError,
     WeatherServiceError,
-    _current_rain_probability,
     _get_json,
     get_forecast,
     resolve_coordinates,
@@ -23,7 +23,7 @@ from weather import (
 )
 
 
-class OpenMeteoErrorTests(unittest.TestCase):
+class WeatherProviderTests(unittest.TestCase):
     def setUp(self):
         with weather._cache_lock:
             weather._response_cache.clear()
@@ -39,6 +39,26 @@ class OpenMeteoErrorTests(unittest.TestCase):
                 "longitude": -45.25,
             },
         )
+
+    @patch("weather.requests.get")
+    def test_geocoding_keeps_open_meteo_timezone(self, get):
+        response = Mock()
+        response.json.return_value = {
+            "results": [
+                {
+                    "name": "Helsinki",
+                    "country": "Finland",
+                    "latitude": 60.17,
+                    "longitude": 24.94,
+                    "timezone": "Europe/Helsinki",
+                }
+            ]
+        }
+        get.return_value = response
+        location = resolve_location("Helsinki")
+
+        self.assertEqual(location["timezone"], "Europe/Helsinki")
+        self.assertEqual(get.call_args.args[0], GEOCODING_URL)
 
     def test_rejects_invalid_coordinates(self):
         for latitude, longitude in (
@@ -93,18 +113,18 @@ class OpenMeteoErrorTests(unittest.TestCase):
         get.assert_called_once()
 
     @patch("weather.requests.get")
-    def test_nearby_forecast_coordinates_share_cache_without_rounding_request(self, get):
+    def test_forecast_cache_key_truncates_coordinates_to_four_decimal_places(self, get):
         response = Mock()
         response.json.return_value = {"forecast": "nearby"}
         get.return_value = response
-        first_params = {"latitude": 60.17123, "longitude": 24.94123, "timezone": "auto"}
-        nearby_params = {"latitude": 60.17134, "longitude": 24.94134, "timezone": "auto"}
+        first_params = {"lat": 60.17123, "lon": 24.94123}
+        nearby_params = {"lat": 60.17129, "lon": 24.94129}
 
         first = _get_json(FORECAST_URL, first_params)
         nearby = _get_json(FORECAST_URL, nearby_params)
         farther = _get_json(
             FORECAST_URL,
-            {"latitude": 60.18123, "longitude": 24.94123, "timezone": "auto"},
+            {"lat": 60.18123, "lon": 24.94123},
         )
 
         self.assertEqual(nearby, first)
@@ -112,7 +132,7 @@ class OpenMeteoErrorTests(unittest.TestCase):
         self.assertEqual(get.call_count, 2)
         self.assertEqual(get.call_args_list[0].kwargs["params"], first_params)
         self.assertEqual(
-            get.call_args_list[1].kwargs["params"]["latitude"],
+            get.call_args_list[1].kwargs["params"]["lat"],
             60.18123,
         )
 
@@ -188,57 +208,49 @@ class OpenMeteoErrorTests(unittest.TestCase):
         get.assert_called_once()
         sleep.assert_not_called()
 
-    def test_missing_current_rain_probability_is_not_reported_as_zero(self):
-        payload = {
-            "current": {"time": "2026-10-05T12:00"},
-            "hourly": {
-                "time": ["2026-10-05T12:00"],
-                "precipitation_probability": [None],
-            },
-        }
-        with self.assertRaisesRegex(WeatherServiceError, "did not return"):
-            _current_rain_probability(payload)
-
     @staticmethod
-    def _forecast_payload(hourly_count=48, daily_count=7):
-        start = datetime.fromisoformat("2026-10-05T12:00")
+    def _forecast_payload(step_count=216):
+        start = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
         return {
-            "timezone": "Europe/Helsinki",
-            "current": {
-                "time": start.isoformat(),
-                "temperature_2m": 14.5,
-                "apparent_temperature": 13.0,
-                "relative_humidity_2m": 63,
-                "wind_speed_10m": 12.0,
-                "weather_code": 2,
-                "is_day": 1,
-            },
-            "hourly": {
-                "time": [(start + timedelta(hours=index)).isoformat() for index in range(hourly_count)],
-                "temperature_2m": [14.5] * hourly_count,
-                "precipitation_probability": [20] * hourly_count,
-                "precipitation": [0.0] * hourly_count,
-                "wind_speed_10m": [12.0] * hourly_count,
-                "weather_code": [2] * hourly_count,
-            },
-            "daily": {
-                "time": [
-                    (start.date() + timedelta(days=index)).isoformat()
-                    for index in range(daily_count)
+            "properties": {
+                "meta": {"updated_at": "2026-10-05T10:00:00Z"},
+                "timeseries": [
+                    {
+                        "time": (start + timedelta(hours=index)).isoformat().replace("+00:00", "Z"),
+                        "data": {
+                            "instant": {
+                                "details": {
+                                    "air_temperature": 14.5 + (index % 12),
+                                    "relative_humidity": 63,
+                                    "wind_speed": 10 / 3.6,
+                                    "wind_from_direction": 225,
+                                    "cloud_area_fraction": 45,
+                                }
+                            },
+                            "next_1_hours": {
+                                "summary": {"symbol_code": "partlycloudy_day"},
+                                "details": {
+                                    "precipitation_amount": 0.1 if index == 0 else 0,
+                                },
+                            },
+                        },
+                    }
+                    for index in range(step_count)
                 ],
-                "weather_code": [2] * daily_count,
-                "temperature_2m_max": [18.0] * daily_count,
-                "temperature_2m_min": [10.0] * daily_count,
-                "precipitation_probability_max": [20] * daily_count,
-            },
+            }
         }
 
     @patch("weather.requests.get")
-    def test_forecast_includes_timezone_and_next_24_hour_insights(self, get):
+    def test_met_norway_response_maps_to_forecast_features(self, get):
         response = Mock()
+        response.headers = {"Cache-Control": "max-age=900"}
         response.json.return_value = self._forecast_payload()
         get.return_value = response
-        location = {"latitude": 60.17, "longitude": 24.94}
+        location = {
+            "latitude": 60.17329,
+            "longitude": 24.94129,
+            "timezone": "Europe/Helsinki",
+        }
 
         forecast = get_forecast(location)
         cached_forecast = get_forecast(location)
@@ -246,43 +258,82 @@ class OpenMeteoErrorTests(unittest.TestCase):
         self.assertEqual(forecast["timezone"], "Europe/Helsinki")
         self.assertEqual(len(forecast["forecast"]), 7)
         self.assertEqual(len(forecast["hourly"]), 24)
-        self.assertEqual(len(forecast["hourly_forecast"]), 48)
-        self.assertEqual(forecast["hourly"][0]["time"], "2026-10-05T12:00")
-        self.assertEqual(forecast["hourly"][0]["rain_probability_pct"], 20)
-        self.assertEqual(forecast["hourly"][0]["wind_kmh"], 12.0)
-        self.assertEqual(forecast["hourly_forecast"][-1]["time"], "2026-10-07T11:00")
-        self.assertEqual(get.call_args.kwargs["params"]["timezone"], "auto")
+        self.assertEqual(len(forecast["hourly_forecast"]), 216)
+        self.assertEqual(forecast["hourly"][0]["time"], "2026-10-05T15:00")
+        self.assertEqual(forecast["hourly"][0]["precipitation_mm"], 0.1)
+        self.assertEqual(forecast["hourly"][0]["wind_kmh"], 10.0)
+        self.assertEqual(forecast["current"]["humidity_pct"], 63)
+        self.assertEqual(forecast["current"]["wind_direction_degrees"], 225)
+        self.assertEqual(forecast["current"]["cloud_cover_pct"], 45)
+        self.assertIsNone(forecast["current"]["feels_like_c"])
+        self.assertEqual(forecast["current"]["condition"], "Partly cloudy")
+        self.assertEqual(forecast["forecast"][0]["high_c"], 22.5)
+        self.assertEqual(get.call_args.args[0], FORECAST_URL)
+        self.assertEqual(get.call_args.kwargs["params"], {"lat": 60.1732, "lon": 24.9412})
+        self.assertEqual(
+            get.call_args.kwargs["headers"]["User-Agent"],
+            "WeatherGPT/1.0 (https://github.com/syntaxelite/WeatherGPT)",
+        )
         self.assertEqual(cached_forecast, forecast)
         get.assert_called_once()
 
     @patch("weather.requests.get")
-    def test_rejects_forecast_with_fewer_than_seven_days(self, get):
+    def test_missing_precipitation_is_not_fabricated_as_zero(self, get):
         response = Mock()
-        response.json.return_value = self._forecast_payload(daily_count=6)
-        get.return_value = response
-
-        with self.assertRaisesRegex(WeatherServiceError, "inconsistent daily data"):
-            get_forecast({"latitude": 0, "longitude": 0})
-
-    @patch("weather.requests.get")
-    def test_rejects_forecast_with_fewer_than_24_upcoming_hours(self, get):
-        response = Mock()
-        response.json.return_value = self._forecast_payload(hourly_count=23)
-        get.return_value = response
-
-        with self.assertRaisesRegex(WeatherServiceError, "incomplete hourly data"):
-            get_forecast({"latitude": 0, "longitude": 0})
-
-    @patch("weather.requests.get")
-    def test_rejects_invalid_hourly_rain_probability(self, get):
+        response.headers = {}
         payload = self._forecast_payload()
-        payload["hourly"]["precipitation_probability"][0] = 101
-        response = Mock()
+        del payload["properties"]["timeseries"][0]["data"]["next_1_hours"]["details"][
+            "precipitation_amount"
+        ]
         response.json.return_value = payload
         get.return_value = response
 
-        with self.assertRaisesRegex(WeatherServiceError, "invalid hourly rain probability"):
+        forecast = get_forecast(
+            {"latitude": 0, "longitude": 0, "timezone": "Europe/Helsinki"}
+        )
+        self.assertIsNone(forecast["hourly"][0]["precipitation_mm"])
+        self.assertNotIn("rain_probability_pct", forecast["hourly"][0])
+
+    @patch("weather.requests.get")
+    def test_rejects_forecast_with_fewer_than_seven_days(self, get):
+        response = Mock()
+        response.headers = {}
+        response.json.return_value = self._forecast_payload(step_count=5 * 24)
+        get.return_value = response
+
+        with self.assertRaisesRegex(WeatherServiceError, "fewer than seven forecast days"):
             get_forecast({"latitude": 0, "longitude": 0})
+
+    @patch("weather.requests.get")
+    def test_rejects_incomplete_met_norway_response(self, get):
+        payload = self._forecast_payload()
+        del payload["properties"]["timeseries"][0]["data"]["instant"]["details"][
+            "relative_humidity"
+        ]
+        response = Mock()
+        response.headers = {}
+        response.json.return_value = payload
+        get.return_value = response
+
+        with self.assertRaisesRegex(WeatherServiceError, "incomplete forecast details"):
+            get_forecast({"latitude": 0, "longitude": 0})
+
+    @patch("weather.requests.get")
+    def test_forecast_cache_honors_provider_cache_control(self, get):
+        response = Mock()
+        response.headers = {"Cache-Control": "public, max-age=14400"}
+        response.json.return_value = self._forecast_payload()
+        get.return_value = response
+
+        get_forecast({"latitude": 1, "longitude": 2})
+        cache_key = weather._cache_key(FORECAST_URL, {"lat": 1.0, "lon": 2.0})
+
+        self.assertGreaterEqual(
+            weather._response_cache[cache_key][0] - weather.time.monotonic(),
+            4 * 60 * 60 - 1,
+        )
+        self.assertEqual(weather._cache_ttl(FORECAST_URL, "max-age=900"), FORECAST_CACHE_TTL_SECONDS)
+        get.assert_called_once()
 
 
 if __name__ == "__main__":

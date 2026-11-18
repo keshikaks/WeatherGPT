@@ -21,8 +21,8 @@ def weather_fixture():
             "condition": "Partly cloudy",
             "humidity_pct": 55,
             "wind_kmh": 12.0,
-            "rain_probability_pct": 20,
-            "observed_at": "2026-10-05T12:00",
+            "precipitation_mm": 0.6,
+            "forecast_at": "2026-10-05T12:00",
             "is_day": True,
         },
         "forecast": [
@@ -31,7 +31,7 @@ def weather_fixture():
                 "high_c": 20.0,
                 "low_c": 10.0,
                 "condition": "Partly cloudy",
-                "rain_probability_pct": 20,
+                "precipitation_mm": 0.6,
             }
             for day in range(5, 12)
         ],
@@ -44,14 +44,12 @@ def hourly_fixture(
     *,
     condition="Partly cloudy",
     temperature=20.0,
-    rain=10,
     precipitation=0.0,
     wind=12.0,
 ):
     return {
         "time": "2026-10-05T15:00",
         "temperature_c": temperature,
-        "rain_probability_pct": rain,
         "precipitation_mm": precipitation,
         "wind_kmh": wind,
         "condition": condition,
@@ -355,8 +353,8 @@ class WeatherEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertTrue(payload["answer"].startswith("No,"))
-        self.assertIn("20% chance of rain", payload["answer"])
+        self.assertTrue(payload["answer"].startswith("Yes—"))
+        self.assertIn("0.6 mm of precipitation", payload["answer"])
         self.assertEqual(payload["location"]["name"], "Munnar")
         understand.assert_called_once_with("Should I carry an umbrella?", [])
         resolve.assert_called_once_with("Munnar")
@@ -581,7 +579,7 @@ class WeatherEndpointTests(unittest.TestCase):
         self.assertIn("20°C", answer)
         self.assertIn("10°C", answer)
         self.assertIn("partly cloudy", answer)
-        self.assertIn("20% chance of rain", answer)
+        self.assertIn("0.6 mm", answer)
         self.assertNotIn("humidity", answer)
         self.assertNotIn("Current conditions", answer)
         groq_client.assert_not_called()
@@ -602,7 +600,6 @@ class WeatherEndpointTests(unittest.TestCase):
         self.assertTrue(answer.startswith("Yes—"))
         self.assertIn("picnic", answer)
         self.assertIn("around 3 PM", answer)
-        self.assertIn("10% chance of rain", answer)
         self.assertIn("12 km/h winds", answer)
 
     def test_activity_without_a_requested_hour_uses_that_days_best_window(self):
@@ -611,7 +608,6 @@ class WeatherEndpointTests(unittest.TestCase):
             {
                 **hourly_fixture(),
                 "time": "2026-10-05T08:00",
-                "rain_probability_pct": 5,
             },
             hourly_fixture(),
         ]
@@ -626,14 +622,12 @@ class WeatherEndpointTests(unittest.TestCase):
 
         self.assertTrue(answer.startswith("Yes—"))
         self.assertIn("around 8 AM", answer)
-        self.assertIn("5% chance of rain", answer)
 
     def test_activity_answer_uses_a_severe_hour_to_recommend_against_it(self):
         weather = weather_fixture()
         weather["hourly_forecast"] = [
             hourly_fixture(
                 condition="Thunderstorm",
-                rain=85,
                 precipitation=4.0,
                 wind=48,
             )
@@ -650,7 +644,7 @@ class WeatherEndpointTests(unittest.TestCase):
 
         self.assertTrue(answer.startswith("No—"))
         self.assertIn("thunderstorm", answer.casefold())
-        self.assertIn("85% chance of rain", answer)
+        self.assertIn("4 mm", answer)
 
     def test_unavailable_hourly_condition_does_not_make_a_confident_recommendation(self):
         weather = weather_fixture()
@@ -683,9 +677,11 @@ class WeatherEndpointTests(unittest.TestCase):
         self.assertIn("don't have an hourly forecast", answer)
         self.assertIn("3 PM", answer)
 
-    def test_umbrella_answer_is_direct_and_uses_hourly_rain_data(self):
+    def test_umbrella_answer_is_direct_and_uses_hourly_precipitation_data(self):
         weather = weather_fixture()
-        weather["hourly_forecast"] = [hourly_fixture(rain=65, precipitation=0.8)]
+        weather["hourly_forecast"] = [
+            hourly_fixture(condition="Rain", precipitation=0.8)
+        ]
 
         answer = app.generate_answer(
             "Should I bring an umbrella in Munnar at 3 PM?",
@@ -697,7 +693,7 @@ class WeatherEndpointTests(unittest.TestCase):
         )
 
         self.assertTrue(answer.startswith("Yes—"))
-        self.assertIn("65% chance of rain", answer)
+        self.assertIn("rain", answer.casefold())
         self.assertIn("0.8 mm of precipitation", answer)
 
     def test_answer_rejects_day_offset_outside_available_forecast(self):

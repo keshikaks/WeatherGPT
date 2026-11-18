@@ -33,26 +33,29 @@ interface WeatherDay {
   high_c: number;
   low_c: number;
   condition: string;
-  rain_probability_pct: number;
+  precipitation_mm: number | null;
 }
 
 interface WeatherSnapshot {
   temperature_c: number;
-  feels_like_c: number;
+  feels_like_c: number | null;
   condition: string;
   humidity_pct: number;
   wind_kmh: number;
-  rain_probability_pct: number;
-  observed_at: string;
+  wind_direction_degrees: number;
+  cloud_cover_pct: number;
+  precipitation_mm: number | null;
+  forecast_at: string;
   is_day: boolean;
 }
 
 interface HourlyWeather {
   time: string;
   temperature_c: number;
-  rain_probability_pct: number;
-  precipitation_mm: number;
+  precipitation_mm: number | null;
   wind_kmh: number;
+  wind_direction_degrees: number;
+  cloud_cover_pct: number;
   condition: string;
 }
 
@@ -85,6 +88,7 @@ interface SelectedWeatherLocation {
   country: string;
   latitude?: number;
   longitude?: number;
+  timezone?: string;
 }
 
 type ViewState = "initial" | "loading" | "success" | "error";
@@ -96,7 +100,7 @@ type RequestBody =
       conversation?: ConversationTurn[];
       default_location?: SelectedWeatherLocation;
     }
-  | { latitude: number; longitude: number };
+  | { latitude: number; longitude: number; timezone?: string };
 interface ComparisonResponse {
   comparisons: WeatherResponse[];
 }
@@ -178,27 +182,29 @@ function getWalkAdvice(weather: WeatherResponse["weather"]): {
   const condition = today?.condition.toLowerCase() ?? "";
   const severeConditions = ["thunder", "heavy rain", "freezing", "heavy snow"];
   const severe = severeConditions.some((term) => condition.includes(term));
-  const rainChance = today?.rain_probability_pct ?? current.rain_probability_pct;
+  const precipitation = today?.precipitation_mm ?? current.precipitation_mm;
   const highWind = current.wind_kmh >= 35;
+  const precipitationText =
+    precipitation === null ? "precipitation amount unavailable" : `${precipitation} mm expected precipitation`;
 
-  if (severe || rainChance >= 60 || highWind) {
+  if (severe || (precipitation !== null && precipitation >= 2) || highWind) {
     return {
       title: "A walk can wait",
       detail: "Today's forecast points to weather that may make a walk less comfortable.",
-      evidence: `${today?.condition ?? current.condition}, ${rainChance}% forecast rain chance, ${Math.round(current.wind_kmh)} km/h current wind.`,
+      evidence: `${today?.condition ?? current.condition}, ${precipitationText}, ${Math.round(current.wind_kmh)} km/h current wind.`,
     };
   }
-  if (rainChance <= 25 && current.wind_kmh < 25 && !condition.includes("rain")) {
+  if (precipitation === 0 && current.wind_kmh < 25 && !condition.includes("rain")) {
     return {
       title: "Looks good for a walk",
       detail: "Today's forecast looks relatively calm. Take a layer if the temperature calls for one.",
-      evidence: `${today?.condition ?? current.condition}, ${rainChance}% forecast rain chance, ${Math.round(current.wind_kmh)} km/h current wind.`,
+      evidence: `${today?.condition ?? current.condition}, ${precipitationText}, ${Math.round(current.wind_kmh)} km/h current wind.`,
     };
   }
   return {
     title: "Check the timing",
     detail: "Conditions are mixed. A short look outside before you leave may help.",
-    evidence: `${today?.condition ?? current.condition}, ${rainChance}% forecast rain chance, ${Math.round(current.wind_kmh)} km/h current wind.`,
+    evidence: `${today?.condition ?? current.condition}, ${precipitationText}, ${Math.round(current.wind_kmh)} km/h current wind.`,
   };
 }
 
@@ -313,6 +319,7 @@ export default function App() {
         name: payload.location.name,
         region: payload.location.region,
         country: payload.location.country,
+        timezone: payload.weather.timezone,
         ...(payload.location.latitude !== undefined && payload.location.longitude !== undefined
           ? {
               latitude: payload.location.latitude,
@@ -411,7 +418,14 @@ export default function App() {
     requestBrowserPosition()
       .then(async ({ latitude, longitude }) => {
         setLocationMessage("Using the location shared by your browser.");
-        const loaded = await loadWeather({ latitude, longitude }, "Your location");
+        const loaded = await loadWeather(
+          {
+            latitude,
+            longitude,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          },
+          "Your location",
+        );
         if (!loaded) {
           setLocationFallback(true);
           setLocationMessage("We couldn't load your local forecast. Search for a city instead.");
@@ -487,7 +501,7 @@ export default function App() {
             <p className="intro-copy">
               Current conditions and a practical seven-day outlook for wherever you are.
             </p>
-            <p className="source-note">Live data from Open-Meteo</p>
+            <p className="source-note">Forecasts from MET Norway</p>
           </div>
         </section>
 
@@ -692,7 +706,7 @@ export default function App() {
                 )}
               </div>
               <p className="observed-at">
-                Observed {formatObservation(result.weather.current.observed_at, result.weather.timezone)}
+                Forecast for {formatObservation(result.weather.current.forecast_at, result.weather.timezone)}
                 <span>{result.weather.timezone.replaceAll("_", " ")}</span>
               </p>
             </div>
@@ -714,7 +728,11 @@ export default function App() {
                 <WeatherFact
                   icon={ThermometerSimple}
                   label="Feels like"
-                  value={`${Math.round(result.weather.current.feels_like_c)}°C`}
+                  value={
+                    result.weather.current.feels_like_c === null
+                      ? "Unavailable"
+                      : `${Math.round(result.weather.current.feels_like_c)}°C`
+                  }
                 />
                 <WeatherFact
                   icon={Drop}
@@ -728,8 +746,12 @@ export default function App() {
                 />
                 <WeatherFact
                   icon={CloudRain}
-                  label="Rain chance"
-                  value={`${result.weather.current.rain_probability_pct}%`}
+                  label="Precipitation"
+                  value={
+                    result.weather.current.precipitation_mm === null
+                      ? "Unavailable"
+                      : `${result.weather.current.precipitation_mm} mm`
+                  }
                 />
               </div>
             </div>
@@ -757,7 +779,9 @@ export default function App() {
 
       <footer className="site-footer">
         <span>WeatherGPT</span>
-        <span>Weather data by Open-Meteo</span>
+        <a href="https://api.met.no/doc/License" target="_blank" rel="noreferrer">
+          Weather data by MET Norway (CC BY 4.0)
+        </a>
       </footer>
     </div>
   );
@@ -792,7 +816,7 @@ function ForecastDay({ day }: { day: WeatherDay }) {
       </div>
       <span className="forecast-rain">
         <Drop size={13} weight="regular" aria-hidden="true" />
-        {day.rain_probability_pct}%
+        {day.precipitation_mm === null ? "—" : `${day.precipitation_mm} mm`}
       </span>
     </article>
   );
@@ -816,10 +840,10 @@ function WalkAdvice({ weather }: { weather: WeatherResponse["weather"] }) {
         <details className="walk-rules">
           <summary>How this suggestion is made</summary>
           <p>
-            We suggest waiting when rain chance is 60% or higher, wind is 35 km/h or higher, or
-            the forecast reports thunder, heavy rain, freezing precipitation, or heavy snow. A
-            calmer suggestion needs 25% rain chance or less, wind below 25 km/h, and no rain
-            forecast.
+            We suggest waiting when expected daily precipitation is 2 mm or more, wind is 35 km/h
+            or higher, or the forecast reports thunder, heavy rain, freezing precipitation, or
+            heavy snow. A calmer suggestion needs no expected precipitation, wind below 25 km/h,
+            and no rain forecast.
           </p>
         </details>
       </div>
@@ -839,7 +863,7 @@ function PlanMyDay({ hours, timezone }: { hours: HourlyWeather[]; timezone: stri
         <p>Hourly options for the next 24 hours</p>
       </div>
       <p className="plan-method">
-        Times are ranked using forecast rain probability, temperature, wind, precipitation, and
+        Times are ranked using forecast precipitation, temperature, wind, and
         severe-weather conditions.
       </p>
       <div className="activity-plans">
@@ -858,16 +882,18 @@ function PlanMyDay({ hours, timezone }: { hours: HourlyWeather[]; timezone: stri
                     </span>
                     <span className="activity-reason">
                       {Math.round(window.temperature_c)}°C is in the {plan.criteria.minTemperatureC}-
-                      {plan.criteria.maxTemperatureC}°C range. Rain is {window.rain_probability_pct}%
-                      {" "}(limit {plan.criteria.maxRainProbabilityPct}%), precipitation is{" "}
-                      {window.precipitation_mm} mm, and wind is {Math.round(window.wind_kmh)} km/h
+                      {plan.criteria.maxTemperatureC}°C range. Expected precipitation is{" "}
+                      {window.precipitation_mm === null ? "unavailable" : `${window.precipitation_mm} mm`}
+                      {" "}and wind is {Math.round(window.wind_kmh)} km/h
                       {" "}(limit {plan.criteria.maxWindKmh} km/h). {window.condition}.
                     </span>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="activity-none">No forecast hour meets the activity thresholds.</p>
+              <p className="activity-none">
+                No forecast hour meets the activity thresholds, or required data is unavailable.
+              </p>
             )}
           </article>
         ))}
@@ -890,6 +916,10 @@ function WeatherInsights({ weather }: { weather: WeatherResponse["weather"] }) {
     .join(" ");
   const scale = getDailyScale(forecast);
   const dailySpan = Math.max(1, scale.max - scale.min);
+  const maxPrecipitation = Math.max(
+    1,
+    ...hourly.map((hour) => hour.precipitation_mm ?? 0),
+  );
 
   return (
     <section className="weather-insights" aria-labelledby="insights-title">
@@ -948,18 +978,29 @@ function WeatherInsights({ weather }: { weather: WeatherResponse["weather"] }) {
       </div>
 
       <div className="insight-chart">
-        <h4>Hourly rain probability</h4>
-        <div className="rain-chart" role="list" aria-label="Hourly rain probability over the next 24 hours">
+        <h4>Hourly expected precipitation</h4>
+        <div className="rain-chart" role="list" aria-label="Hourly expected precipitation over the next 24 hours">
           {hourly.map((hour) => (
             <div className="rain-column" role="listitem" key={hour.time}>
               <span
-                className="rain-column-fill"
-                style={{ height: `${hour.rain_probability_pct}%` }}
-                title={`${formatLocationDateTime(hour.time, timezone, { hour: "numeric" })}: ${hour.rain_probability_pct}% rain probability`}
+                className={
+                  hour.precipitation_mm === null
+                    ? "rain-column-fill precipitation-unavailable"
+                    : "rain-column-fill"
+                }
+                style={{
+                  height:
+                    hour.precipitation_mm === null
+                      ? "3px"
+                      : `${(hour.precipitation_mm / maxPrecipitation) * 100}%`,
+                }}
+                title={`${formatLocationDateTime(hour.time, timezone, { hour: "numeric" })}: ${
+                  hour.precipitation_mm === null ? "unavailable" : `${hour.precipitation_mm} mm`
+                } expected precipitation`}
               />
               <span className="sr-only">
                 {formatLocationDateTime(hour.time, timezone, { hour: "numeric" })}:{" "}
-                {hour.rain_probability_pct}% chance of rain
+                {hour.precipitation_mm === null ? "precipitation unavailable" : `${hour.precipitation_mm} mm expected precipitation`}
               </span>
             </div>
           ))}
@@ -973,7 +1014,10 @@ function WeatherInsights({ weather }: { weather: WeatherResponse["weather"] }) {
             ) : null,
           )}
         </div>
-        <div className="chart-scale"><span>0%</span><span>100%</span></div>
+        <div className="chart-scale">
+          <span>0 mm</span>
+          <span>{maxPrecipitation} mm</span>
+        </div>
       </div>
 
       <div className="insight-chart daily-trend">
@@ -1015,7 +1059,7 @@ function CityComparison({ comparison }: { comparison: ComparisonResponse }) {
           <p className="result-label">SIDE BY SIDE</p>
           <h2>City comparison</h2>
         </div>
-        <p>Live conditions and seven-day forecasts from Open-Meteo.</p>
+        <p>Live conditions and seven-day forecasts from MET Norway.</p>
       </div>
       <div className="comparison-grid">
         {[first, second].map((city) => (
@@ -1032,8 +1076,22 @@ function CityComparison({ comparison }: { comparison: ComparisonResponse }) {
             </div>
             <p className="comparison-condition">{city.weather.current.condition}</p>
             <dl className="comparison-facts">
-              <div><dt>Feels like</dt><dd>{Math.round(city.weather.current.feels_like_c)}°C</dd></div>
-              <div><dt>Rain chance now</dt><dd>{city.weather.current.rain_probability_pct}%</dd></div>
+              <div>
+                <dt>Feels like</dt>
+                <dd>
+                  {city.weather.current.feels_like_c === null
+                    ? "Unavailable"
+                    : `${Math.round(city.weather.current.feels_like_c)}°C`}
+                </dd>
+              </div>
+              <div>
+                <dt>Precipitation</dt>
+                <dd>
+                  {city.weather.current.precipitation_mm === null
+                    ? "Unavailable"
+                    : `${city.weather.current.precipitation_mm} mm`}
+                </dd>
+              </div>
               <div><dt>Wind</dt><dd>{Math.round(city.weather.current.wind_kmh)} km/h</dd></div>
               <div><dt>Humidity</dt><dd>{city.weather.current.humidity_pct}%</dd></div>
             </dl>
@@ -1045,7 +1103,7 @@ function CityComparison({ comparison }: { comparison: ComparisonResponse }) {
                   <div key={day.date}>
                     <span>{weekday}</span>
                     <span>{Math.round(day.high_c)}° / {Math.round(day.low_c)}°</span>
-                    <small>{day.rain_probability_pct}% rain</small>
+                    <small>{day.precipitation_mm === null ? "—" : `${day.precipitation_mm} mm`}</small>
                   </div>
                 );
               })}

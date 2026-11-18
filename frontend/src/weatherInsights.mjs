@@ -1,8 +1,8 @@
 const activityRules = [
-  { activity: "Walking", rain: 45, wind: 38, minTemp: 2, maxTemp: 34 },
-  { activity: "Jogging", rain: 30, wind: 30, minTemp: 6, maxTemp: 29 },
-  { activity: "Cycling", rain: 25, wind: 27, minTemp: 5, maxTemp: 31 },
-  { activity: "Picnic", rain: 18, wind: 22, minTemp: 16, maxTemp: 31 },
+  { activity: "Walking", maxPrecipitationMm: 0.4, wind: 38, minTemp: 2, maxTemp: 34 },
+  { activity: "Jogging", maxPrecipitationMm: 0.2, wind: 30, minTemp: 6, maxTemp: 29 },
+  { activity: "Cycling", maxPrecipitationMm: 0.2, wind: 27, minTemp: 5, maxTemp: 31 },
+  { activity: "Picnic", maxPrecipitationMm: 0.2, wind: 22, minTemp: 16, maxTemp: 31 },
 ];
 
 const unsafeCondition = /thunder|heavy rain|freezing|heavy snow|violent/i;
@@ -19,16 +19,16 @@ export function getActivityPlans(hours) {
           Math.max(0, rule.minTemp - hour.temperature_c, hour.temperature_c - rule.maxTemp) * 3;
         const score =
           100 -
-          hour.rain_probability_pct * 0.65 -
+          (hour.precipitation_mm ?? rule.maxPrecipitationMm + 1) * 12 -
           hour.wind_kmh * 0.45 -
           temperaturePenalty -
           (hour.precipitation_mm > 0.2 ? 12 : 0);
         const suitable =
-          hour.rain_probability_pct <= rule.rain &&
+          hour.precipitation_mm !== null &&
+          hour.precipitation_mm <= rule.maxPrecipitationMm &&
           hour.wind_kmh <= rule.wind &&
           hour.temperature_c >= rule.minTemp &&
           hour.temperature_c <= rule.maxTemp &&
-          hour.precipitation_mm <= 0.2 &&
           !unsafeCondition.test(hour.condition);
         return { hour, score, suitable };
       })
@@ -39,7 +39,7 @@ export function getActivityPlans(hours) {
     return {
       activity: rule.activity,
       criteria: {
-        maxRainProbabilityPct: rule.rain,
+        maxPrecipitationMm: rule.maxPrecipitationMm,
         maxWindKmh: rule.wind,
         minTemperatureC: rule.minTemp,
         maxTemperatureC: rule.maxTemp,
@@ -47,7 +47,6 @@ export function getActivityPlans(hours) {
       windows: candidates.map(({ hour }) => ({
         time: hour.time,
         temperature_c: hour.temperature_c,
-        rain_probability_pct: hour.rain_probability_pct,
         precipitation_mm: hour.precipitation_mm,
         wind_kmh: hour.wind_kmh,
         condition: hour.condition,

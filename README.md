@@ -1,8 +1,10 @@
 # WeatherGPT
 
-WeatherGPT is a React, Vite, and TypeScript frontend backed by Flask. It uses Open-Meteo for geocoding and live weather forecasts, and Groq with Qwen for weather-question interpretation. The backend builds answers from retrieved forecast facts; the model does not invent or generate weather conditions. API keys stay on the backend.
+WeatherGPT is a React, Vite, and TypeScript frontend backed by Flask. It uses Open-Meteo for city geocoding, MET Norway's Locationforecast API for live weather forecasts, and Groq with Qwen for weather-question interpretation. The backend builds answers from retrieved forecast facts; the model does not invent or generate weather conditions. API keys stay on the backend.
 
-Features include current conditions, seven-day forecasts, transparent walk advice, hourly activity planning, two-city comparison, saved cities in browser storage, hourly and daily weather visualizations, conversational weather-science answers, and concise weather recommendations for picnics, travel, running, and umbrellas. Follow-up questions use recent in-session context; live-weather answers remain grounded in Open-Meteo forecasts and report when requested data is unavailable.
+Features include current conditions, seven-day forecasts, transparent walk advice, hourly activity planning, two-city comparison, saved cities in browser storage, hourly and daily weather visualizations, conversational weather-science answers, and concise weather recommendations for picnics, travel, running, and umbrellas. Follow-up questions use recent in-session context; live-weather answers remain grounded in MET Norway forecasts and report when requested data is unavailable. Precipitation is shown as forecast millimetres because the compact API does not provide precipitation probabilities.
+
+MET Norway requests identify the project using its public GitHub repository as contact information. Forecast requests are cached for at least three hours, use coordinates truncated to four decimal places, and credit MET Norway's data under [CC BY 4.0](https://api.met.no/doc/License).
 
 ## Requirements
 
@@ -85,4 +87,4 @@ npm test
 npm run build
 ```
 
-The frontend test suite covers location-local date/time formatting, activity-window selection, trend scaling, and saved-location persistence logic. Backend tests cover Open-Meteo validation, timezone propagation, API errors, weather-answer grounding, comparisons, and production frontend routing.
+The frontend test suite covers location-local date/time formatting, activity-window selection, trend scaling, and saved-location persistence logic. Backend tests cover Open-Meteo geocoding, mocked MET Norway forecast mapping and caching, timezone propagation, API errors, weather-answer grounding, comparisons, and production frontend routing.
